@@ -20,7 +20,8 @@ def_attrs! {
         async_name str,
         blocking_name str,
         gen_async bool,
-        gen_blocking bool
+        gen_blocking bool,
+        xml_path str
     };
 
     // Keep this in sync with interface's proxy method attributes.
@@ -113,6 +114,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, input: ItemTrait) -> Result<Tok
             // Signal args structs are shared between the two proxies so always generate it for
             // async proxy only unless async proxy generation is disabled.
             !gen_async,
+            attrs.xml_path.as_deref(),
         )?
     } else {
         quote! {}
@@ -130,6 +132,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, input: ItemTrait) -> Result<Tok
             &proxy_name,
             false,
             true,
+            attrs.xml_path.as_deref(),
         )?
     } else {
         quote! {}
@@ -152,6 +155,7 @@ pub fn create_proxy(
     proxy_name: &str,
     blocking: bool,
     gen_sig_args: bool,
+    xml_path: Option<&str>,
 ) -> Result<TokenStream, Error> {
     let zbus = zbus_path();
 
@@ -225,6 +229,29 @@ pub fn create_proxy(
                     true,
                 )
             });
+
+            if let Some(xml_path) = xml_path {
+                // The recreated member_name does not always match the inteded one in XML
+                // e.g. members with consecutive capital letters like `GetCPUInfo`
+
+                if member_name_missing_from_xml_definition(
+                    xml_path,
+                    input,
+                    iface_name.as_str(),
+                    member_name.as_str(),
+                    is_signal,
+                    is_property,
+                )? {
+                    return Err(Error::new(
+                        m.span(),
+                        format!(
+                            "Trait method `{method_name}`'s recreated member name: `{member_name}` is not found in `{iface_name}` in the XML file at `{xml_path:?}`\n
+                            Hint: Member names with successive capital letters may cause the re-creation the member name to fail.\n
+                            If this is the case, consider decorating `fn {method_name}` with the correct member name `#[zbus(name = \"ZBMember\")]`",
+                        ),
+                    ));
+                }
+            }
 
             let m = if let Some(prop_attrs) = property {
                 has_properties = true;
@@ -1127,4 +1154,57 @@ fn gen_proxy_signal(
     };
 
     (receive_signal, stream_types)
+}
+
+fn member_name_missing_from_xml_definition(
+    xml_path: &str,
+    input: &ItemTrait,
+    iface_name: &str,
+    member_name: &str,
+    is_property: bool,
+    is_signal: bool,
+) -> Result<bool, Error> {
+    let mut found = false;
+    let xml_file = std::fs::File::open(xml_path).map_err(|e| {
+        Error::new(
+            input.span(),
+            format!("failed to open the XML file at `{xml_path:?}`: {e}"),
+        )
+    })?;
+
+    let node = zbus_xml::Node::from_reader(xml_file).map_err(|e| {
+        Error::new(
+            input.span(),
+            format!("failed to parse the XML file at `{xml_path:?}`: {e}"),
+        )
+    })?;
+
+    for iface in node.interfaces() {
+        if iface.name().as_str() == iface_name {
+            if is_property {
+                for prop in iface.properties() {
+                    if prop.name().as_str() == member_name {
+                        found = true;
+                        break;
+                    }
+                }
+            } else if is_signal {
+                for signal in iface.signals() {
+                    if signal.name().as_str() == member_name {
+                        found = true;
+                        break;
+                    }
+                }
+            } else {
+                for method in iface.methods() {
+                    if method.name().as_str() == member_name {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(found)
 }

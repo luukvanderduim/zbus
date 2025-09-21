@@ -2232,6 +2232,7 @@ dependencies = [
  "syn 2.0.106",
  "zbus",
  "zbus_names",
+ "zbus_xml",
  "zvariant",
  "zvariant_utils",
 ]
